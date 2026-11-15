@@ -1,10 +1,19 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
+const Post = require('../models/Post');
 const User = require('../models/User');
 const { requireAuth, TOKEN_ISSUER } = require('../middleware/authMiddleware');
 const HttpError = require('../utils/HttpError');
+const {
+  getUploadedImage,
+  removeImageSafely,
+  saveImage,
+  uploadImage,
+} = require('../utils/imageUpload');
 
 const router = express.Router();
+const rootRouter = express.Router();
+const objectIdPattern = /^[a-f\d]{24}$/i;
 
 function validateEmail(email) {
   return typeof email === 'string'
@@ -24,13 +33,16 @@ function createToken(userId) {
   );
 }
 
-router.post('/register', async (req, res) => {
-  const { name, email, password } = req.body || {};
+const registerHandler = async (req, res) => {
+  const { email, password, username } = req.body || {};
+  const name = req.body.name ?? req.body.username;
+  const normalizedUsername = typeof username === 'string' ? username.trim().toLowerCase() : '';
+  const hasEmail = email !== undefined && email !== null && email !== '';
   if (typeof name !== 'string' || !name.trim() || name.trim().length > 80) {
-    throw new HttpError(400, 'Name is required and must be 80 characters or fewer.');
+    throw new HttpError(400, 'Name or username is required and must be 80 characters or fewer.');
   }
-  if (!validateEmail(email)) {
-    throw new HttpError(400, 'A valid email address is required.');
+  if ((!hasEmail && !normalizedUsername) || (hasEmail && !validateEmail(email))) {
+    throw new HttpError(400, 'A valid email address or username is required.');
   }
   if (
     typeof password !== 'string'
@@ -40,11 +52,24 @@ router.post('/register', async (req, res) => {
     throw new HttpError(400, 'Password must be at least 8 characters and no more than 72 bytes.');
   }
 
-  const user = await User.create({
-    name: name.trim(),
-    email: email.trim().toLowerCase(),
-    password,
-  });
+  const imageField = req.files && req.files.avatar ? 'avatar' : 'profilePicture';
+  const image = getUploadedImage(req, imageField);
+  const profilePicture = image ? await saveImage(image) : null;
+  let user;
+  try {
+    user = await User.create({
+      name: name.trim(),
+      username: normalizedUsername || undefined,
+      email: hasEmail ? email.trim().toLowerCase() : undefined,
+      password,
+      profilePicture,
+    });
+  } catch (error) {
+    if (profilePicture) {
+      await removeImageSafely(profilePicture);
+    }
+    throw error;
+  }
 
   res.status(201).json({
     success: true,
@@ -52,20 +77,31 @@ router.post('/register', async (req, res) => {
       user: {
         id: String(user._id),
         name: user.name,
+        username: user.username || user.name,
         email: user.email,
+        profilePicture: user.profilePicture,
+        avatar: user.avatar,
       },
       token: createToken(user._id),
     },
   });
-});
+};
+router.post('/register', uploadImage, registerHandler);
+rootRouter.post('/register', uploadImage, registerHandler);
 
-router.post('/login', async (req, res) => {
-  const { email, password } = req.body || {};
-  if (!validateEmail(email) || typeof password !== 'string') {
-    throw new HttpError(400, 'A valid email and password are required.');
+const loginHandler = async (req, res) => {
+  const { email, password, username } = req.body || {};
+  const normalizedUsername = typeof username === 'string' ? username.trim().toLowerCase() : '';
+  const validEmail = validateEmail(email);
+  if ((!validEmail && !normalizedUsername) || typeof password !== 'string') {
+    throw new HttpError(400, 'A valid email or username and password are required.');
   }
 
-  const user = await User.findOne({ email: email.trim().toLowerCase() }).select('+password');
+  const user = await User.findOne(
+    validEmail
+      ? { email: email.trim().toLowerCase() }
+      : { username: normalizedUsername },
+  ).select('+password');
   if (!user || !(await user.comparePassword(password))) {
     throw new HttpError(401, 'Email or password is incorrect.');
   }
@@ -76,15 +112,88 @@ router.post('/login', async (req, res) => {
       user: {
         id: String(user._id),
         name: user.name,
+        username: user.username || user.name,
         email: user.email,
+        profilePicture: user.profilePicture,
+        avatar: user.avatar,
       },
       token: createToken(user._id),
+    },
+  });
+};
+router.post('/login', loginHandler);
+rootRouter.post('/login', loginHandler);
+
+const uploadHandler = async (req, res) => {
+  const image = getUploadedImage(req, 'avatar');
+  if (!image) {
+    throw new HttpError(400, 'Upload an image using the "avatar" field.');
+  }
+
+  const user = await User.findById(req.auth.userId);
+  if (!user) {
+    throw new HttpError(404, 'User not found.');
+  }
+
+  const avatar = await saveImage(image);
+  const previousAvatar = user.profilePicture;
+  user.profilePicture = avatar;
+  try {
+    await user.save();
+  } catch (error) {
+    await removeImageSafely(avatar);
+    throw error;
+  }
+
+  if (previousAvatar) {
+    await removeImageSafely(previousAvatar);
+  }
+
+  res.json({
+    success: true,
+    data: {
+      user: {
+        id: String(user._id),
+        name: user.name,
+        username: user.username || user.name,
+        email: user.email,
+        profilePicture: user.profilePicture,
+        avatar: user.avatar,
+      },
+    },
+  });
+};
+router.post('/upload', requireAuth, uploadImage, uploadHandler);
+rootRouter.post('/upload', requireAuth, uploadImage, uploadHandler);
+
+router.get('/authors', async (req, res) => {
+  const [authors, postCounts] = await Promise.all([
+    User.find().select('name username profilePicture createdAt').sort({ name: 1 }).lean(),
+    Post.aggregate([
+      { $group: { _id: '$author', postCount: { $sum: 1 } } },
+    ]),
+  ]);
+  const countsByAuthor = new Map(
+    postCounts.map(({ _id, postCount }) => [String(_id), postCount]),
+  );
+
+  res.json({
+    success: true,
+    data: {
+      authors: authors.map((author) => ({
+        id: String(author._id),
+        name: author.name,
+        username: author.username || author.name,
+        profilePicture: author.profilePicture,
+        postCount: countsByAuthor.get(String(author._id)) || 0,
+      })),
     },
   });
 });
 
 router.get('/me', requireAuth, async (req, res) => {
-  const user = await User.findById(req.auth.userId).select('name email createdAt');
+  const user = await User.findById(req.auth.userId)
+    .select('name username email profilePicture createdAt');
   if (!user) {
     throw new HttpError(404, 'User not found.');
   }
@@ -92,4 +201,125 @@ router.get('/me', requireAuth, async (req, res) => {
   res.json({ success: true, data: { user } });
 });
 
-module.exports = router;
+router.get('/:id', async (req, res) => {
+  if (!objectIdPattern.test(req.params.id)) {
+    throw new HttpError(400, 'Invalid user ID.');
+  }
+
+  const user = await User.findById(req.params.id)
+    .select('name username profilePicture createdAt')
+    .lean();
+  if (!user) {
+    throw new HttpError(404, 'User not found.');
+  }
+  const postCount = await Post.countDocuments({ author: user._id });
+
+  res.json({
+    success: true,
+    data: {
+      user: {
+        id: String(user._id),
+        name: user.name,
+        username: user.username || user.name,
+        profilePicture: user.profilePicture,
+        createdAt: user.createdAt,
+        postCount,
+      },
+    },
+  });
+});
+
+router.patch('/:id', requireAuth, async (req, res) => {
+  if (!objectIdPattern.test(req.params.id)) {
+    throw new HttpError(400, 'Invalid user ID.');
+  }
+  if (req.params.id !== req.auth.userId) {
+    throw new HttpError(403, 'You can only update your own profile.');
+  }
+
+  const user = await User.findById(req.params.id).select('+password');
+  if (!user) {
+    throw new HttpError(404, 'User not found.');
+  }
+
+  const body = req.body || {};
+  const hasName = Object.hasOwn(body, 'name');
+  const hasEmail = Object.hasOwn(body, 'email');
+  const hasNewPassword = Object.hasOwn(body, 'newPassword') && body.newPassword !== '';
+  if (!hasName && !hasEmail && !hasNewPassword) {
+    throw new HttpError(400, 'Provide a name, email, or new password to update.');
+  }
+  if (hasName) {
+    if (typeof body.name !== 'string' || !body.name.trim() || body.name.trim().length > 80) {
+      throw new HttpError(400, 'Name is required and must be 80 characters or fewer.');
+    }
+    user.name = body.name.trim();
+  }
+  if (hasEmail) {
+    if (!validateEmail(body.email)) {
+      throw new HttpError(400, 'A valid email address is required.');
+    }
+    user.email = body.email.trim().toLowerCase();
+  }
+  if (hasNewPassword) {
+    if (
+      typeof body.currentPassword !== 'string'
+      || !(await user.comparePassword(body.currentPassword))
+    ) {
+      throw new HttpError(401, 'Current password is incorrect.');
+    }
+    if (
+      typeof body.newPassword !== 'string'
+      || body.newPassword.length < 8
+      || Buffer.byteLength(body.newPassword, 'utf8') > 72
+    ) {
+      throw new HttpError(400, 'New password must be at least 8 characters and no more than 72 bytes.');
+    }
+    user.password = body.newPassword;
+  } else if (body.currentPassword) {
+    throw new HttpError(400, 'Provide a new password to change your password.');
+  }
+
+  await user.save();
+  res.json({
+    success: true,
+    data: {
+      user: {
+        id: String(user._id),
+        name: user.name,
+        username: user.username || user.name,
+        email: user.email,
+        profilePicture: user.profilePicture,
+        avatar: user.avatar,
+      },
+    },
+  });
+});
+
+router.delete('/:id', requireAuth, async (req, res) => {
+  if (!objectIdPattern.test(req.params.id)) {
+    throw new HttpError(400, 'Invalid user ID.');
+  }
+  if (req.params.id !== req.auth.userId) {
+    throw new HttpError(403, 'You can only delete your own account.');
+  }
+
+  const user = await User.findById(req.params.id);
+  if (!user) {
+    throw new HttpError(404, 'User not found.');
+  }
+
+  // Delete all posts by this user
+  await Post.deleteMany({ author: req.params.id });
+
+  // Remove profile picture if exists
+  if (user.profilePicture) {
+    await removeImageSafely(user.profilePicture);
+  }
+
+  await User.findByIdAndDelete(req.params.id);
+
+  res.json({ success: true, message: 'User deleted.' });
+});
+
+module.exports = { rootRouter, router };

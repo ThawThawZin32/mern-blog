@@ -27,19 +27,19 @@ const allowedImages = {
   '.webp': { mime: 'image/webp', matches: (bytes) => bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP' },
 };
 
-function getUploadedImage(req) {
+function getUploadedImage(req, fieldName = 'coverImage') {
   if (!req.files) {
     return null;
   }
 
   const fields = Object.keys(req.files);
-  if (fields.length !== 1 || fields[0] !== 'coverImage') {
-    throw new HttpError(400, 'Upload the image using the "coverImage" field only.');
+  if (fields.length !== 1 || fields[0] !== fieldName) {
+    throw new HttpError(400, `Upload the image using the "${fieldName}" field only.`);
   }
 
-  const image = req.files.coverImage;
+  const image = req.files[fieldName];
   if (Array.isArray(image)) {
-    throw new HttpError(400, 'Upload only one cover image.');
+    throw new HttpError(400, 'Upload only one image.');
   }
   if (image.truncated) {
     throw new HttpError(413, 'Image must be 5 MB or smaller.');
@@ -62,7 +62,7 @@ async function readFileHeader(file) {
   return file.data.subarray(0, 12);
 }
 
-async function saveCoverImage(file) {
+async function saveImage(file) {
   const extension = path.extname(file.name).toLowerCase();
   const imageType = allowedImages[extension];
   if (!imageType || file.mimetype !== imageType.mime) {
@@ -84,7 +84,7 @@ async function saveCoverImage(file) {
   return `/uploads/${filename}`;
 }
 
-async function deleteCoverImage(imagePath) {
+async function deleteImage(imagePath) {
   if (typeof imagePath !== 'string' || !imagePath.startsWith('/uploads/')) {
     return;
   }
@@ -103,18 +103,21 @@ async function deleteCoverImage(imagePath) {
   }
 }
 
-async function removeCoverImageSafely(imagePath) {
+async function removeImageSafely(imagePath) {
   try {
-    await deleteCoverImage(imagePath);
+    await deleteImage(imagePath);
   } catch (error) {
     console.error('Could not remove uploaded image:', error);
   }
 }
 
 module.exports = {
-  deleteCoverImage,
+  deleteCoverImage: deleteImage,
+  deleteImage,
   getUploadedImage,
-  removeCoverImageSafely,
-  saveCoverImage,
+  removeCoverImageSafely: removeImageSafely,
+  removeImageSafely,
+  saveCoverImage: saveImage,
+  saveImage,
   uploadImage,
 };

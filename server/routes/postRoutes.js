@@ -13,6 +13,16 @@ const {
 
 const router = express.Router();
 const objectIdPattern = /^[a-f\d]{24}$/i;
+const categories = new Set([
+  'agriculture',
+  'business',
+  'education',
+  'entertainment',
+  'art',
+  'investment',
+  'uncategorized',
+  'weather',
+]);
 
 function parseTags(value) {
   if (value === undefined) {
@@ -78,21 +88,42 @@ function escapeRegex(value) {
 async function listPosts(req, res, authorId) {
   const { page, limit } = parsePagination(req.query);
   const filter = {};
+  const conditions = [];
   if (authorId) {
     filter.author = authorId;
+  } else if (req.query.author !== undefined) {
+    if (typeof req.query.author !== 'string' || !objectIdPattern.test(req.query.author)) {
+      throw new HttpError(400, 'Invalid author ID.');
+    }
+    filter.author = req.query.author;
   }
   if (req.query.tag !== undefined) {
     if (typeof req.query.tag !== 'string' || !req.query.tag.trim()) {
       throw new HttpError(400, 'Tag filter must not be empty.');
     }
-    filter.tags = req.query.tag.trim().toLowerCase();
+    conditions.push({ tags: req.query.tag.trim().toLowerCase() });
+  }
+  if (req.query.category !== undefined) {
+    if (
+      typeof req.query.category !== 'string'
+      || !categories.has(req.query.category.trim().toLowerCase())
+    ) {
+      throw new HttpError(400, 'Invalid post category.');
+    }
+    const category = req.query.category.trim().toLowerCase();
+    conditions.push(category === 'uncategorized'
+      ? { $or: [{ tags: { $exists: false } }, { tags: { $size: 0 } }] }
+      : { tags: category });
   }
   if (req.query.search !== undefined) {
     if (typeof req.query.search !== 'string' || req.query.search.length > 100) {
       throw new HttpError(400, 'Search must be 100 characters or fewer.');
     }
     const search = new RegExp(escapeRegex(req.query.search.trim()), 'i');
-    filter.$or = [{ title: search }, { content: search }];
+    conditions.push({ $or: [{ title: search }, { content: search }] });
+  }
+  if (conditions.length > 0) {
+    filter.$and = conditions;
   }
 
   const [posts, total] = await Promise.all([
@@ -100,7 +131,7 @@ async function listPosts(req, res, authorId) {
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit)
-      .populate('author', 'name'),
+      .populate('author', 'name profilePicture'),
     Post.countDocuments(filter),
   ]);
 
@@ -126,7 +157,7 @@ router.get('/:id', async (req, res) => {
     throw new HttpError(400, 'Invalid post ID.');
   }
 
-  const post = await Post.findById(req.params.id).populate('author', 'name');
+  const post = await Post.findById(req.params.id).populate('author', 'name profilePicture');
   if (!post) {
     throw new HttpError(404, 'Post not found.');
   }
@@ -144,7 +175,7 @@ router.post('/', requireAuth, uploadImage, async (req, res) => {
       coverImage,
       author: new mongoose.Types.ObjectId(req.auth.userId),
     });
-    await post.populate('author', 'name');
+    await post.populate('author', 'name profilePicture');
     res.status(201).json({ success: true, data: { post } });
   } catch (error) {
     if (coverImage) {
@@ -154,7 +185,7 @@ router.post('/', requireAuth, uploadImage, async (req, res) => {
   }
 });
 
-router.patch('/:id', requireAuth, uploadImage, async (req, res) => {
+const updatePostHandler = async (req, res) => {
   if (!objectIdPattern.test(req.params.id)) {
     throw new HttpError(400, 'Invalid post ID.');
   }
@@ -164,7 +195,7 @@ router.patch('/:id', requireAuth, uploadImage, async (req, res) => {
     throw new HttpError(404, 'Post not found.');
   }
   if (String(post.author) !== req.auth.userId) {
-    throw new HttpError(403, 'You can only edit your own posts.');
+    throw new HttpError(403, 'You can only delete your own posts');
   }
 
   const fields = readPostFields(req.body || {}, { partial: true });
@@ -182,7 +213,7 @@ router.patch('/:id', requireAuth, uploadImage, async (req, res) => {
     }
     Object.assign(post, fields);
     await post.save();
-    await post.populate('author', 'name');
+    await post.populate('author', 'name profilePicture');
   } catch (error) {
     if (newCoverImage) {
       await removeCoverImageSafely(newCoverImage);
@@ -194,7 +225,9 @@ router.patch('/:id', requireAuth, uploadImage, async (req, res) => {
     await removeCoverImageSafely(oldCoverImage);
   }
   res.json({ success: true, data: { post } });
-});
+};
+router.patch('/:id', requireAuth, uploadImage, updatePostHandler);
+router.put('/:id', requireAuth, uploadImage, updatePostHandler);
 
 router.delete('/:id', requireAuth, async (req, res) => {
   if (!objectIdPattern.test(req.params.id)) {
@@ -206,7 +239,7 @@ router.delete('/:id', requireAuth, async (req, res) => {
     throw new HttpError(404, 'Post not found.');
   }
   if (String(post.author) !== req.auth.userId) {
-    throw new HttpError(403, 'You can only delete your own posts.');
+    throw new HttpError(403, 'You can only delete your own posts');
   }
 
   await post.deleteOne();

@@ -18,7 +18,7 @@ function errorHandler(error, req, res, next) {
     message = error.message;
   } else if (error.code === 11000) {
     status = 409;
-    message = 'A user with this email already exists.';
+    message = 'A user with this email or username already exists.';
   } else if (error.type === 'entity.parse.failed') {
     status = 400;
     message = 'Request body contains invalid JSON.';

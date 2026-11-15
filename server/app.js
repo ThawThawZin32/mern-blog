@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-const userRoutes = require('./routes/userRoutes');
+const { rootRouter: rootUserRoutes, router: userRoutes } = require('./routes/userRoutes');
 const postRoutes = require('./routes/postRoutes');
 const { notFound, errorHandler } = require('./middleware/errorMiddleware');
 
@@ -27,6 +27,7 @@ app.use('/uploads', express.static(uploadDirectory, {
 app.get('/api/health', (req, res) => {
   res.json({ success: true, data: { status: 'ok' } });
 });
+app.use('/api', rootUserRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/posts', postRoutes);
 app.use(notFound);

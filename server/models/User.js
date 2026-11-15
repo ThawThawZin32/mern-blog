@@ -8,13 +8,25 @@ const userSchema = new mongoose.Schema({
     trim: true,
     maxlength: 80,
   },
+  username: {
+    type: String,
+    trim: true,
+    lowercase: true,
+    maxlength: 80,
+    unique: true,
+    sparse: true,
+  },
   email: {
     type: String,
-    required: true,
     unique: true,
+    sparse: true,
     lowercase: true,
     trim: true,
     maxlength: 254,
+  },
+  profilePicture: {
+    type: String,
+    default: null,
   },
   password: {
     type: String,
@@ -38,8 +50,21 @@ userSchema.pre('save', async function hashPassword() {
   }
 });
 
+userSchema.virtual('avatar')
+  .get(function getAvatar() {
+    return this.profilePicture;
+  })
+  .set(function setAvatar(value) {
+    this.profilePicture = value;
+  });
+
 userSchema.methods.comparePassword = function comparePassword(password) {
   return bcrypt.compare(password, this.password);
 };
+
+userSchema.set('toJSON', {
+  ...userSchema.get('toJSON'),
+  virtuals: true,
+});
 
 module.exports = mongoose.models.User || mongoose.model('User', userSchema);
